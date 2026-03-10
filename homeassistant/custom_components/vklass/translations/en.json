@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Vklass",
+        "description": "Enter your Vklass guardian account credentials.",
+        "data": {
+          "username": "Username",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to reach Vklass. Check your internet connection.",
+      "invalid_auth": "Invalid username or password.",
+      "unknown": "Unexpected error. Check the Home Assistant logs."
+    },
+    "abort": {
+      "already_configured": "This Vklass account is already configured."
+    }
+  }
+}

@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+"""
+Vklass scraper — fetches today's schedule, meals, and calendar events.
+Replicates the Home Assistant Vklass sensor approach.
+
+Usage:
+    python vklass.py [--username USERNAME] [--password PASSWORD]
+
+Credentials are read from CLI args or env vars VKLASS_USERNAME / VKLASS_PASSWORD.
+"""
+
+import argparse
+import json
+import os
+import re
+import sys
+from datetime import datetime, timedelta, timezone
+
+try:
+    import requests
+    from bs4 import BeautifulSoup
+except ImportError as e:
+    print(json.dumps({"error": f"Missing dependency: {e}. Run: pip install requests beautifulsoup4"}))
+    sys.exit(1)
+
+AUTH_BASE = "https://auth.vklass.se"
+CUSTODIAN_BASE = "https://custodian.vklass.se"
+
+
+def get_verification_token(session: requests.Session) -> str:
+    resp = session.get(f"{AUTH_BASE}/credentials", timeout=15)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+    token_input = soup.find("input", {"name": "__RequestVerificationToken"})
+    if not token_input:
+        raise ValueError("Could not find __RequestVerificationToken in login page")
+    return token_input["value"]
+
+
+def authenticate(session: requests.Session, username: str, password: str) -> None:
+    token = get_verification_token(session)
+    resp = session.post(
+        f"{AUTH_BASE}/credentials/signin",
+        data={
+            "username": username,
+            "password": password,
+            "__RequestVerificationToken": token,
+        },
+        allow_redirects=False,
+        timeout=15,
+    )
+    # Successful auth returns a 302 redirect
+    if resp.status_code not in (302, 200):
+        raise ValueError(f"Authentication failed (HTTP {resp.status_code})")
+    # Follow redirects to establish session on custodian
+    if resp.status_code == 302:
+        location = resp.headers.get("Location", "")
+        if location:
+            session.get(location, timeout=15)
+
+
+def parse_students(session: requests.Session) -> list[dict]:
+    resp = session.get(f"{CUSTODIAN_BASE}/Home", timeout=15)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    students = []
+    # Student cards — each child has a card with name + care schedule + meal info
+    for card in soup.select(".student-card, .child-card, [data-student-id]"):
+        student_id = (
+            card.get("data-student-id")
+            or card.get("data-id")
+            or ""
+        )
+        name_el = card.select_one(".student-name, .child-name, h2, h3")
+        name = name_el.get_text(strip=True) if name_el else "Unknown"
+
+        meal_el = card.select_one(".meal, .lunch, [class*='meal'], [class*='lunch']")
+        meal = meal_el.get_text(strip=True) if meal_el else ""
+
+        students.append({"id": student_id, "name": name, "meal": meal})
+
+    # Fallback: try to find student IDs from links / scripts if no cards found
+    if not students:
+        for link in soup.select("a[href*='studentId='], a[href*='student/']"):
+            href = link.get("href", "")
+            m = re.search(r"studentId=(\d+)", href)
+            if m:
+                student_id = m.group(1)
+                if not any(s["id"] == student_id for s in students):
+                    name = link.get_text(strip=True) or f"Student {student_id}"
+                    students.append({"id": student_id, "name": name, "meal": ""})
+
+        # Also scan inline scripts for student data
+        for script in soup.find_all("script"):
+            text = script.string or ""
+            for m in re.finditer(r'"studentId"\s*:\s*"?(\d+)"?.*?"name"\s*:\s*"([^"]+)"', text):
+                student_id, name = m.group(1), m.group(2)
+                if not any(s["id"] == student_id for s in students):
+                    students.append({"id": student_id, "name": name, "meal": ""})
+
+    return students
+
+
+def fetch_calendar(session: requests.Session, student_id: str) -> list[dict]:
+    now = datetime.now(timezone.utc)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+
+    resp = session.post(
+        f"{CUSTODIAN_BASE}/Events/FullCalendar",
+        json={
+            "studentId": student_id,
+            "start": start.strftime("%Y-%m-%dT%H:%M:%S"),
+            "end": end.strftime("%Y-%m-%dT%H:%M:%S"),
+        },
+        timeout=15,
+    )
+    if not resp.ok:
+        return []
+
+    try:
+        events_raw = resp.json()
+    except Exception:
+        return []
+
+    events = []
+    for ev in events_raw if isinstance(events_raw, list) else []:
+        events.append({
+            "start": ev.get("start", ""),
+            "end": ev.get("end", ""),
+            "text": ev.get("title", ev.get("text", ev.get("name", ""))),
+        })
+    return events
+
+
+def detect_gymclass(calendar: list[dict]) -> str:
+    gym_keywords = ["idrott", "gym", "pe ", "sport", "idrottslektion", "fysik"]
+    today = datetime.now(timezone.utc).date()
+    tomorrow = today + timedelta(days=1)
+
+    for ev in calendar:
+        text = ev.get("text", "").lower()
+        if any(kw in text for kw in gym_keywords):
+            start_str = ev.get("start", "")
+            try:
+                ev_date = datetime.fromisoformat(start_str).date()
+                if ev_date == today:
+                    return "today"
+                if ev_date == tomorrow:
+                    return "tomorrow"
+            except Exception:
+                pass
+    return "none"
+
+
+def fetch_notifications(session: requests.Session) -> int:
+    resp = session.get(f"{CUSTODIAN_BASE}/Account/Scoreboard", timeout=15)
+    if not resp.ok:
+        return 0
+    try:
+        data = resp.json()
+        if isinstance(data, dict):
+            return int(data.get("unread", data.get("count", data.get("notifications", 0))))
+        if isinstance(data, int):
+            return data
+    except Exception:
+        pass
+    return 0
+
+
+def scrape(username: str, password: str) -> dict:
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        )
+    })
+
+    authenticate(session, username, password)
+    students = parse_students(session)
+    notifications = fetch_notifications(session)
+
+    children = []
+    for student in students:
+        student_id = student["id"]
+        calendar = fetch_calendar(session, student_id) if student_id else []
+        children.append({
+            "name": student["name"],
+            "meal": student["meal"],
+            "gymclass": detect_gymclass(calendar),
+            "calendar": calendar,
+            "notifications": notifications,
+        })
+
+    return {"children": children}
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Fetch Vklass schedule data")
+    parser.add_argument("--username", default=os.environ.get("VKLASS_USERNAME", ""))
+    parser.add_argument("--password", default=os.environ.get("VKLASS_PASSWORD", ""))
+    args = parser.parse_args()
+
+    if not args.username or not args.password:
+        print(json.dumps({"error": "Missing credentials. Set VKLASS_USERNAME and VKLASS_PASSWORD or pass --username/--password"}))
+        sys.exit(1)
+
+    try:
+        result = scrape(args.username, args.password)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    except Exception as e:
+        print(json.dumps({"error": str(e)}))
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
