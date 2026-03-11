@@ -52,6 +52,7 @@ class VklassCoordinator(DataUpdateCoordinator):
                 student_id = student["id"]
                 calendar = await self._fetch_calendar(session, student_id) if student_id else []
                 report = reports.get(student["name"], {})
+                study_overview = await self._fetch_study_overview(session, student_id) if student_id else []
                 children.append(
                     {
                         "name": student["name"],
@@ -62,6 +63,7 @@ class VklassCoordinator(DataUpdateCoordinator):
                         "report_date": report.get("date", ""),
                         "upcoming": report.get("upcoming", []),
                         "ical_url": report.get("ical_url", ""),
+                        "study_overview": study_overview,
                     }
                 )
 
@@ -228,6 +230,56 @@ class VklassCoordinator(DataUpdateCoordinator):
                 "text": ev.get("title", ev.get("text", ev.get("name", ""))),
             }
             for ev in events_raw
+        ]
+
+    async def _fetch_study_overview(self, session: aiohttp.ClientSession, student_id: str) -> list[dict]:
+        import json as _json
+        import re as _re
+
+        async with session.get(
+            f"{CUSTODIAN_BASE}/StudyOverview/Student/{student_id}",
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as resp:
+            if not resp.ok:
+                return []
+            html = await resp.text()
+
+        soup = BeautifulSoup(html, "html.parser")
+        sel = soup.find("select", {"id": "SchoolId"})
+        if not sel:
+            return []
+        opt = sel.find("option", {"selected": True})
+        school_id = opt["value"] if opt else ""
+        if not school_id:
+            return []
+
+        async with session.get(
+            f"{CUSTODIAN_BASE}/StudyOverview/Courses/{student_id}?school={school_id}",
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as resp:
+            if not resp.ok:
+                return []
+            courses_html = await resp.text()
+
+        m = _re.search(r"enhanceServerHtml\('studyoverview-courses',\s*'',\s*'(\{.*?)\s*',\s*'", courses_html, _re.DOTALL)
+        if not m:
+            return []
+        try:
+            data = _json.loads(m.group(1))
+        except Exception:
+            return []
+
+        items = data.get("items", []) + data.get("inactiveItems", [])
+        return [
+            {
+                "subject": item.get("subjectName", item.get("courseName", "")),
+                "course": item.get("courseNameAndCourseCode", ""),
+                "judgement": item.get("judgement", ""),
+                "grade": item.get("grade"),
+                "date": item.get("date", ""),
+                "active": item.get("courseActive", True),
+            }
+            for item in items
         ]
 
     async def _fetch_notifications(self, session: aiohttp.ClientSession) -> int:

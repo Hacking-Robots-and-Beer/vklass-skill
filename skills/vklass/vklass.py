@@ -203,6 +203,55 @@ def detect_gymclass(calendar: list[dict]) -> str:
     return "none"
 
 
+def _extract_school_id(html: str) -> str:
+    """Extract the selected school ID from the StudyOverview/Student page."""
+    soup = BeautifulSoup(html, "html.parser")
+    sel = soup.find("select", {"id": "SchoolId"})
+    if not sel:
+        return ""
+    opt = sel.find("option", {"selected": True})
+    return opt["value"] if opt else ""
+
+
+def _extract_study_overview_json(html: str) -> list[dict]:
+    """Extract course items from the JSON blob embedded in StudyOverview/Courses page."""
+    m = re.search(r"enhanceServerHtml\('studyoverview-courses',\s*'',\s*'(\{.*?)\s*',\s*'", html, re.DOTALL)
+    if not m:
+        return []
+    try:
+        data = json.loads(m.group(1))
+    except Exception:
+        return []
+    items = data.get("items", []) + data.get("inactiveItems", [])
+    return [
+        {
+            "subject": item.get("subjectName", item.get("courseName", "")),
+            "course": item.get("courseNameAndCourseCode", ""),
+            "judgement": item.get("judgement", ""),
+            "grade": item.get("grade"),
+            "date": item.get("date", ""),
+            "active": item.get("courseActive", True),
+        }
+        for item in items
+    ]
+
+
+def fetch_study_overview(session: requests.Session, student_id: str) -> list[dict]:
+    resp = session.get(f"{CUSTODIAN_BASE}/StudyOverview/Student/{student_id}", timeout=15)
+    if not resp.ok:
+        return []
+    school_id = _extract_school_id(resp.text)
+    if not school_id:
+        return []
+    resp2 = session.get(
+        f"{CUSTODIAN_BASE}/StudyOverview/Courses/{student_id}?school={school_id}",
+        timeout=15,
+    )
+    if not resp2.ok:
+        return []
+    return _extract_study_overview_json(resp2.text)
+
+
 def fetch_notifications(session: requests.Session) -> int:
     resp = session.get(f"{CUSTODIAN_BASE}/Account/Scoreboard", timeout=15)
     if not resp.ok:
@@ -238,6 +287,7 @@ def scrape(username: str, password: str) -> dict:
         student_id = student["id"]
         calendar = fetch_calendar(session, student_id) if student_id else []
         report = reports.get(student["name"], {})
+        study_overview = fetch_study_overview(session, student_id) if student_id else []
         children.append({
             "name": student["name"],
             "meal": student["meal"],
@@ -247,6 +297,7 @@ def scrape(username: str, password: str) -> dict:
             "report_date": report.get("date", ""),
             "upcoming": report.get("upcoming", []),
             "ical_url": report.get("ical_url", ""),
+            "study_overview": study_overview,
         })
 
     return {"children": children}

@@ -38,6 +38,8 @@ All on `https://custodian.vklass.se`:
 | `POST` | `/Events/FullCalendar` | Calendar events | Form body: `{students, start, end}` with timezone-aware ISO dates; returns JSON array |
 | `GET` | `/Account/Scoreboard` | Notification count | Returns `{"notifications": N, "messages": N}` |
 | `GET` | `/WeeklyReports/Archive/` | Weekly letters + iCal URLs | Headers: `X-Requested-With: Fetch`, `vk-client-has-tracking-detail: True`; `vkau-expansion-panel` elements, newest first |
+| `GET` | `/StudyOverview/Student/{id}` | Study overview shell + school ID | Aurelia SPA; extract school ID from `<select id="SchoolId">` selected option |
+| `GET` | `/StudyOverview/Courses/{id}?school={school_id}` | Subject list with judgements | JSON blob in `enhanceServerHtml('studyoverview-courses', '', 'JSON', ...)` script; `items` (active) + `inactiveItems` |
 
 ## Data per child
 
@@ -51,6 +53,7 @@ All on `https://custodian.vklass.se`:
 | `report_date` | `/WeeklyReports/Archive/` | Latest weekly letter date |
 | `upcoming` | `/WeeklyReports/Archive/` `section.events li` | Tests, homework next week |
 | `ical_url` | `/WeeklyReports/Archive/` | Per-school iCal feed (without lectures) |
+| `study_overview` | `/StudyOverview/Student/{id}` | List of subject dicts (keys vary by HTML structure) |
 
 ## Weekly reports endpoint detail
 
