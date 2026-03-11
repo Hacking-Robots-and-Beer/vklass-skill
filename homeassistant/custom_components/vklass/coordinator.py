@@ -41,6 +41,7 @@ class VklassCoordinator(DataUpdateCoordinator):
                 await self._authenticate(session)
                 students = await self._parse_students(session)
                 notifications = await self._fetch_notifications(session)
+                reports = await self._fetch_weekly_reports(session)
             except aiohttp.ClientError as err:
                 raise UpdateFailed(f"Network error: {err}") from err
             except ValueError as err:
@@ -50,13 +51,16 @@ class VklassCoordinator(DataUpdateCoordinator):
             for student in students:
                 student_id = student["id"]
                 calendar = await self._fetch_calendar(session, student_id) if student_id else []
+                report = reports.get(student["name"], {})
                 children.append(
                     {
                         "name": student["name"],
-                        "meal": student["meal"],
                         "gymclass": self._detect_gymclass(calendar),
                         "calendar": calendar,
                         "notifications": notifications,
+                        "report_date": report.get("date", ""),
+                        "upcoming": report.get("upcoming", []),
+                        "ical_url": report.get("ical_url", ""),
                     }
                 )
 
@@ -109,9 +113,59 @@ class VklassCoordinator(DataUpdateCoordinator):
             name, sid = m.group(1), m.group(2)
             if sid not in seen_ids:
                 seen_ids.add(sid)
-                students.append({"id": sid, "name": name, "meal": ""})
+                students.append({"id": sid, "name": name})
 
         return students
+
+    async def _fetch_weekly_reports(self, session: aiohttp.ClientSession) -> dict[str, dict]:
+        """Returns latest weekly report per student, keyed by student name."""
+        async with session.get(
+            f"{CUSTODIAN_BASE}/WeeklyReports/Archive/",
+            headers={"X-Requested-With": "Fetch", "vk-client-has-tracking-detail": "True"},
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as resp:
+            if not resp.ok:
+                return {}
+            html = await resp.text()
+
+        soup = BeautifulSoup(html, "html.parser")
+        reports: dict[str, dict] = {}
+
+        for panel in soup.find_all("vkau-expansion-panel"):
+            trigger = panel.find(attrs={"slot": "expansion-panel-trigger"})
+            content_div = panel.find("div", class_="legacy-html")
+            if not trigger or not content_div:
+                continue
+
+            badge = trigger.find("vkau-icon-badge")
+            if not badge:
+                continue
+
+            name = badge.get("text", "")
+            if not name or name in reports:
+                continue  # panels are newest-first; skip older reports
+
+            date = badge.get("secondary-text", "")
+
+            upcoming = []
+            events_section = content_div.find("section", class_="events")
+            if events_section:
+                for li in events_section.find_all("li"):
+                    text = li.get_text(separator=" ", strip=True)
+                    if text:
+                        upcoming.append(text)
+
+            # iCal URL without lectures
+            ical_url = ""
+            for a in content_div.find_all("a", href=True):
+                href = a["href"].strip()
+                if "cal.vklass.se" in href and "includelectures=false" in href:
+                    ical_url = href
+                    break
+
+            reports[name] = {"date": date, "upcoming": upcoming, "ical_url": ical_url}
+
+        return reports
 
     async def _fetch_calendar(self, session: aiohttp.ClientSession, student_id: str) -> list[dict]:
         now = datetime.now().astimezone()

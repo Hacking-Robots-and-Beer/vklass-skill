@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Vklass scraper — fetches today's schedule, meals, and calendar events.
-Replicates the Home Assistant Vklass sensor approach.
+Vklass scraper — fetches schedule, weekly reports, and notifications.
 
 Usage:
     python vklass.py [--username USERNAME] [--password PASSWORD]
@@ -68,9 +67,59 @@ def parse_students(session: requests.Session) -> list[dict]:
         name, sid = m.group(1), m.group(2)
         if sid not in seen_ids:
             seen_ids.add(sid)
-            students.append({"id": sid, "name": name, "meal": ""})
+            students.append({"id": sid, "name": name})
 
     return students
+
+
+def fetch_weekly_reports(session: requests.Session) -> dict[str, dict]:
+    """Returns latest weekly report per student, keyed by student name."""
+    resp = session.get(
+        f"{CUSTODIAN_BASE}/WeeklyReports/Archive/",
+        headers={"X-Requested-With": "Fetch", "vk-client-has-tracking-detail": "True"},
+        timeout=15,
+    )
+    if not resp.ok:
+        return {}
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    reports: dict[str, dict] = {}
+
+    for panel in soup.find_all("vkau-expansion-panel"):
+        trigger = panel.find(attrs={"slot": "expansion-panel-trigger"})
+        content_div = panel.find("div", class_="legacy-html")
+        if not trigger or not content_div:
+            continue
+
+        badge = trigger.find("vkau-icon-badge")
+        if not badge:
+            continue
+
+        name = badge.get("text", "")
+        if not name or name in reports:
+            continue  # panels are newest-first; skip older reports
+
+        date = badge.get("secondary-text", "")
+
+        upcoming = []
+        events_section = content_div.find("section", class_="events")
+        if events_section:
+            for li in events_section.find_all("li"):
+                text = li.get_text(separator=" ", strip=True)
+                if text:
+                    upcoming.append(text)
+
+        # iCal URL without lectures (cleaner for calendar apps)
+        ical_url = ""
+        for a in content_div.find_all("a", href=True):
+            href = a["href"].strip()
+            if "cal.vklass.se" in href and "includelectures=false" in href:
+                ical_url = href
+                break
+
+        reports[name] = {"date": date, "upcoming": upcoming, "ical_url": ical_url}
+
+    return reports
 
 
 def fetch_calendar(session: requests.Session, student_id: str) -> list[dict]:
@@ -153,17 +202,21 @@ def scrape(username: str, password: str) -> dict:
     authenticate(session, username, password)
     students = parse_students(session)
     notifications = fetch_notifications(session)
+    reports = fetch_weekly_reports(session)
 
     children = []
     for student in students:
         student_id = student["id"]
         calendar = fetch_calendar(session, student_id) if student_id else []
+        report = reports.get(student["name"], {})
         children.append({
             "name": student["name"],
-            "meal": student["meal"],
             "gymclass": detect_gymclass(calendar),
             "calendar": calendar,
             "notifications": notifications,
+            "report_date": report.get("date", ""),
+            "upcoming": report.get("upcoming", []),
+            "ical_url": report.get("ical_url", ""),
         })
 
     return {"children": children}
