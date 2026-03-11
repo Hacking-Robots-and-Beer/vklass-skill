@@ -53,21 +53,50 @@ def authenticate(session: requests.Session, username: str, password: str) -> Non
 
 
 def parse_students(session: requests.Session) -> list[dict]:
-    # The Absence/Notify page reliably lists all wards with IDs and names in a
-    # server-rendered JSON blob used to populate the student picker form.
+    # Absence/Notify: server-rendered JSON blob with all ward IDs and names.
     # Pattern: "fullName":"Sam","disabled":false,...,"value":"348307"
     resp = session.get(f"{CUSTODIAN_BASE}/Absence/Notify", timeout=15)
     resp.raise_for_status()
-    html = resp.text
+    id_html = resp.text
 
-    students: list[dict] = []
+    id_map: dict[str, str] = {}  # name -> student_id
     seen_ids: set[str] = set()
-
-    for m in re.finditer(r'"fullName"\s*:\s*"([^"]+)"[^}]{0,300}"value"\s*:\s*"(\d{4,})"', html):
+    for m in re.finditer(r'"fullName"\s*:\s*"([^"]+)"[^}]{0,300}"value"\s*:\s*"(\d{4,})"', id_html):
         name, sid = m.group(1), m.group(2)
         if sid not in seen_ids:
             seen_ids.add(sid)
-            students.append({"id": sid, "name": name})
+            id_map[name] = sid
+
+    # Home/Welcome: server-rendered student cards with today's meal.
+    # Each card is a div.vk-student-card; name in .vk-student-card-header__text.
+    resp2 = session.get(f"{CUSTODIAN_BASE}/Home/Welcome", timeout=15)
+    resp2.raise_for_status()
+    soup = BeautifulSoup(resp2.text, "html.parser")
+
+    students: list[dict] = []
+    seen_names: set[str] = set()
+
+    for card in soup.find_all("div", class_="vk-student-card"):
+        name_el = card.find(class_="vk-student-card-header__text")
+        name = name_el.get_text(strip=True) if name_el else ""
+        if not name or name in seen_names:
+            continue
+        seen_names.add(name)
+
+        today_div = card.find("div", {"data-vk-first-day": "true"})
+        food_div = today_div.find("div", class_="vk-student-card__day__food") if today_div else None
+        meal_items = [li.get_text(strip=True) for li in food_div.find_all("li")] if food_div else []
+        meal = " | ".join(meal_items)
+
+        # Match name to student ID from Absence/Notify (names may be short/first only)
+        sid = id_map.get(name, "")
+        if not sid:
+            for full_name, full_sid in id_map.items():
+                if full_name.startswith(name) or name in full_name:
+                    sid = full_sid
+                    break
+
+        students.append({"id": sid, "name": name, "meal": meal})
 
     return students
 
@@ -211,6 +240,7 @@ def scrape(username: str, password: str) -> dict:
         report = reports.get(student["name"], {})
         children.append({
             "name": student["name"],
+            "meal": student["meal"],
             "gymclass": detect_gymclass(calendar),
             "calendar": calendar,
             "notifications": notifications,

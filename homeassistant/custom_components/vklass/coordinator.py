@@ -55,6 +55,7 @@ class VklassCoordinator(DataUpdateCoordinator):
                 children.append(
                     {
                         "name": student["name"],
+                        "meal": student["meal"],
                         "gymclass": self._detect_gymclass(calendar),
                         "calendar": calendar,
                         "notifications": notifications,
@@ -97,23 +98,52 @@ class VklassCoordinator(DataUpdateCoordinator):
     # --------------------------------------------------------------- parsing
 
     async def _parse_students(self, session: aiohttp.ClientSession) -> list[dict]:
-        # The Absence/Notify page reliably lists all wards with IDs and names in a
-        # server-rendered JSON blob used to populate the student picker form.
-        # Pattern: "fullName":"Sam","disabled":false,...,"value":"348307"
+        # Absence/Notify: server-rendered JSON blob with all ward IDs and names.
         async with session.get(
             f"{CUSTODIAN_BASE}/Absence/Notify", timeout=aiohttp.ClientTimeout(total=15)
         ) as resp:
             resp.raise_for_status()
-            html = await resp.text()
+            id_html = await resp.text()
 
-        students: list[dict] = []
+        id_map: dict[str, str] = {}
         seen_ids: set[str] = set()
-
-        for m in re.finditer(r'"fullName"\s*:\s*"([^"]+)"[^}]{0,300}"value"\s*:\s*"(\d{4,})"', html):
+        for m in re.finditer(r'"fullName"\s*:\s*"([^"]+)"[^}]{0,300}"value"\s*:\s*"(\d{4,})"', id_html):
             name, sid = m.group(1), m.group(2)
             if sid not in seen_ids:
                 seen_ids.add(sid)
-                students.append({"id": sid, "name": name})
+                id_map[name] = sid
+
+        # Home/Welcome: server-rendered student cards with today's meal.
+        async with session.get(
+            f"{CUSTODIAN_BASE}/Home/Welcome", timeout=aiohttp.ClientTimeout(total=15)
+        ) as resp:
+            resp.raise_for_status()
+            welcome_html = await resp.text()
+
+        soup = BeautifulSoup(welcome_html, "html.parser")
+        students: list[dict] = []
+        seen_names: set[str] = set()
+
+        for card in soup.find_all("div", class_="vk-student-card"):
+            name_el = card.find(class_="vk-student-card-header__text")
+            name = name_el.get_text(strip=True) if name_el else ""
+            if not name or name in seen_names:
+                continue
+            seen_names.add(name)
+
+            today_div = card.find("div", {"data-vk-first-day": "true"})
+            food_div = today_div.find("div", class_="vk-student-card__day__food") if today_div else None
+            meal_items = [li.get_text(strip=True) for li in food_div.find_all("li")] if food_div else []
+            meal = " | ".join(meal_items)
+
+            sid = id_map.get(name, "")
+            if not sid:
+                for full_name, full_sid in id_map.items():
+                    if full_name.startswith(name) or name in full_name:
+                        sid = full_sid
+                        break
+
+            students.append({"id": sid, "name": name, "meal": meal})
 
         return students
 
