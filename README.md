@@ -15,11 +15,14 @@ Vklass integration in two flavours:
 
 ### What it does
 
-Authenticates with Vklass and returns a formatted summary of:
-- Today's lunch menu per child
-- Gym/PE class indicator (today / tomorrow / none)
+Authenticates with Vklass and returns a JSON summary per child:
+
+- Today's lunch menu
+- Gym/PE class indicator (`today` / `tomorrow` / `none`)
 - Full day schedule as a timeline
 - Unread notification count
+- Latest weekly letter date and upcoming assignments
+- iCal subscription URL for the school calendar
 
 ### Requirements
 
@@ -39,8 +42,6 @@ ln -s $(pwd)/skills/vklass ~/.openclaw/skills/vklass
 
 ### Usage
 
-Set credentials and invoke the skill:
-
 ```bash
 export VKLASS_USERNAME=your@email.se
 export VKLASS_PASSWORD=yourpassword
@@ -52,19 +53,22 @@ python3 skills/vklass/vklass.py
 /vklass
 ```
 
-### Manual scraper output
+### Scraper output
 
 ```json
 {
   "children": [
     {
       "name": "Alice",
-      "meal": "Pasta Bolognese",
+      "meal": "Pasta Bolognese | Veg. Linssoppa med bröd",
       "gymclass": "today",
       "calendar": [
-        { "start": "2026-03-10T08:00:00", "end": "2026-03-10T09:00:00", "text": "Svenska" }
+        { "start": "2026-03-11 08:10", "end": "2026-03-11 09:00", "text": "Idrott och hälsa" }
       ],
-      "notifications": 2
+      "notifications": 2,
+      "report_date": "2026-02-27",
+      "upcoming": ["(Fredag 6 mars 2026) Prov, Spanska: Prov i spanska"],
+      "ical_url": "https://cal.vklass.se/UUID.ics?includelectures=false&custodian=true"
     }
   ]
 }
@@ -76,11 +80,11 @@ python3 skills/vklass/vklass.py
 
 ### What it does
 
-Creates **4 sensors per child**, refreshed every 30 minutes:
+Creates sensors per child, refreshed every 30 minutes:
 
 | Sensor | State | Example |
 |--------|-------|---------|
-| `sensor.vklass_<child>_meal` | Today's lunch | `Pasta Bolognese` |
+| `sensor.vklass_<child>_meal` | Today's lunch | `Pasta Bolognese \| Veg. Linssoppa` |
 | `sensor.vklass_<child>_gym_class` | `today` / `tomorrow` / `none` | `today` |
 | `sensor.vklass_<child>_notifications` | Unread messages | `3` |
 | `sensor.vklass_<child>_schedule` | Events today (count) | `5` |
@@ -125,6 +129,21 @@ automation:
           message: "Alice has gym today — don't forget the bag!"
 ```
 
+### Example automation — upcoming test reminder
+
+```yaml
+automation:
+  - alias: "Weekly report check"
+    trigger:
+      - platform: time
+        at: "08:00:00"
+    action:
+      - service: notify.mobile_app
+        data:
+          message: >
+            {{ state_attr('sensor.vklass_alice_schedule', 'next_event') }}
+```
+
 ---
 
 ## Auth flow
@@ -132,10 +151,30 @@ automation:
 Both integrations use the same Vklass authentication:
 
 1. `GET https://auth.vklass.se/credentials` — extract `__RequestVerificationToken`
-2. `POST https://auth.vklass.se/credentials/signin` — submit credentials, expect `302`
-3. Follow redirect to `custodian.vklass.se` to establish session cookies
+2. `POST https://auth.vklass.se/credentials/signin` — submit credentials with `allow_redirects=True`
+3. Redirect chain: `/process` → `custodian.vklass.se` — sets session cookies
 
-All subsequent data is fetched from `custodian.vklass.se`.
+All data is then fetched from `custodian.vklass.se`.
+
+## Endpoints used
+
+| Method | Path | Data |
+|--------|------|------|
+| `GET` | `/Absence/Notify` | Ward IDs and full names |
+| `GET` | `/Home/Welcome` | Student cards with today's meal |
+| `POST` | `/Events/FullCalendar` | Calendar events (form body: `students`, `start`, `end`) |
+| `GET` | `/Account/Scoreboard` | Notification count (`{"notifications": N}`) |
+| `GET` | `/WeeklyReports/Archive/` | Weekly letters, upcoming assignments, iCal URLs |
+
+### iCal subscription
+
+Each weekly report contains a school calendar iCal URL:
+
+```
+https://cal.vklass.se/<UUID>.ics?includelectures=false&custodian=true
+```
+
+Subscribe to this in any calendar app for school events without individual lessons.
 
 ---
 
