@@ -46,73 +46,44 @@ def authenticate(session: requests.Session, username: str, password: str) -> Non
             "password": password,
             "__RequestVerificationToken": token,
         },
-        allow_redirects=False,
+        allow_redirects=True,
         timeout=15,
     )
-    # Successful auth returns a 302 redirect
-    if resp.status_code not in (302, 200):
+    if resp.status_code not in (200, 302):
         raise ValueError(f"Authentication failed (HTTP {resp.status_code})")
-    # Follow redirects to establish session on custodian
-    if resp.status_code == 302:
-        location = resp.headers.get("Location", "")
-        if location:
-            session.get(location, timeout=15)
 
 
 def parse_students(session: requests.Session) -> list[dict]:
-    resp = session.get(f"{CUSTODIAN_BASE}/Home", timeout=15)
+    # The Absence/Notify page reliably lists all wards with IDs and names in a
+    # server-rendered JSON blob used to populate the student picker form.
+    # Pattern: "fullName":"Sam","disabled":false,...,"value":"348307"
+    resp = session.get(f"{CUSTODIAN_BASE}/Absence/Notify", timeout=15)
     resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
+    html = resp.text
 
-    students = []
-    # Student cards — each child has a card with name + care schedule + meal info
-    for card in soup.select(".student-card, .child-card, [data-student-id]"):
-        student_id = (
-            card.get("data-student-id")
-            or card.get("data-id")
-            or ""
-        )
-        name_el = card.select_one(".student-name, .child-name, h2, h3")
-        name = name_el.get_text(strip=True) if name_el else "Unknown"
+    students: list[dict] = []
+    seen_ids: set[str] = set()
 
-        meal_el = card.select_one(".meal, .lunch, [class*='meal'], [class*='lunch']")
-        meal = meal_el.get_text(strip=True) if meal_el else ""
-
-        students.append({"id": student_id, "name": name, "meal": meal})
-
-    # Fallback: try to find student IDs from links / scripts if no cards found
-    if not students:
-        for link in soup.select("a[href*='studentId='], a[href*='student/']"):
-            href = link.get("href", "")
-            m = re.search(r"studentId=(\d+)", href)
-            if m:
-                student_id = m.group(1)
-                if not any(s["id"] == student_id for s in students):
-                    name = link.get_text(strip=True) or f"Student {student_id}"
-                    students.append({"id": student_id, "name": name, "meal": ""})
-
-        # Also scan inline scripts for student data
-        for script in soup.find_all("script"):
-            text = script.string or ""
-            for m in re.finditer(r'"studentId"\s*:\s*"?(\d+)"?.*?"name"\s*:\s*"([^"]+)"', text):
-                student_id, name = m.group(1), m.group(2)
-                if not any(s["id"] == student_id for s in students):
-                    students.append({"id": student_id, "name": name, "meal": ""})
+    for m in re.finditer(r'"fullName"\s*:\s*"([^"]+)"[^}]{0,300}"value"\s*:\s*"(\d{4,})"', html):
+        name, sid = m.group(1), m.group(2)
+        if sid not in seen_ids:
+            seen_ids.add(sid)
+            students.append({"id": sid, "name": name, "meal": ""})
 
     return students
 
 
 def fetch_calendar(session: requests.Session, student_id: str) -> list[dict]:
-    now = datetime.now(timezone.utc)
+    now = datetime.now().astimezone()
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    end = start + timedelta(days=1)
+    end = start + timedelta(days=2)
 
     resp = session.post(
         f"{CUSTODIAN_BASE}/Events/FullCalendar",
-        json={
-            "studentId": student_id,
-            "start": start.strftime("%Y-%m-%dT%H:%M:%S"),
-            "end": end.strftime("%Y-%m-%dT%H:%M:%S"),
+        data={
+            "students": student_id,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
         },
         timeout=15,
     )
@@ -161,7 +132,7 @@ def fetch_notifications(session: requests.Session) -> int:
     try:
         data = resp.json()
         if isinstance(data, dict):
-            return int(data.get("unread", data.get("count", data.get("notifications", 0))))
+            return int(data.get("notifications", data.get("unread", data.get("count", 0))))
         if isinstance(data, int):
             return data
     except Exception:

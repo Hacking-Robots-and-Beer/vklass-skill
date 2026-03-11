@@ -84,69 +84,46 @@ class VklassCoordinator(DataUpdateCoordinator):
                 "password": self._password,
                 "__RequestVerificationToken": token,
             },
-            allow_redirects=False,
+            allow_redirects=True,
             timeout=aiohttp.ClientTimeout(total=15),
         ) as resp:
-            if resp.status not in (302, 200):
+            if resp.status not in (200, 302):
                 raise ValueError(f"Authentication failed (HTTP {resp.status}). Check your credentials.")
-            location = resp.headers.get("Location", "")
-
-        # Follow the redirect to set cookies on custodian.vklass.se
-        if location:
-            async with session.get(location, timeout=aiohttp.ClientTimeout(total=15)) as _:
-                pass
 
     # --------------------------------------------------------------- parsing
 
     async def _parse_students(self, session: aiohttp.ClientSession) -> list[dict]:
-        async with session.get(f"{CUSTODIAN_BASE}/Home", timeout=aiohttp.ClientTimeout(total=15)) as resp:
+        # The Absence/Notify page reliably lists all wards with IDs and names in a
+        # server-rendered JSON blob used to populate the student picker form.
+        # Pattern: "fullName":"Sam","disabled":false,...,"value":"348307"
+        async with session.get(
+            f"{CUSTODIAN_BASE}/Absence/Notify", timeout=aiohttp.ClientTimeout(total=15)
+        ) as resp:
             resp.raise_for_status()
             html = await resp.text()
 
-        soup = BeautifulSoup(html, "html.parser")
         students: list[dict] = []
+        seen_ids: set[str] = set()
 
-        for card in soup.select(".student-card, .child-card, [data-student-id]"):
-            student_id = card.get("data-student-id") or card.get("data-id") or ""
-            name_el = card.select_one(".student-name, .child-name, h2, h3")
-            name = name_el.get_text(strip=True) if name_el else "Unknown"
-            meal_el = card.select_one(".meal, .lunch, [class*='meal'], [class*='lunch']")
-            meal = meal_el.get_text(strip=True) if meal_el else ""
-            students.append({"id": student_id, "name": name, "meal": meal})
-
-        # Fallback: scan links and inline scripts
-        if not students:
-            for link in soup.select("a[href*='studentId='], a[href*='student/']"):
-                m = re.search(r"studentId=(\d+)", link.get("href", ""))
-                if m:
-                    sid = m.group(1)
-                    if not any(s["id"] == sid for s in students):
-                        students.append(
-                            {"id": sid, "name": link.get_text(strip=True) or f"Student {sid}", "meal": ""}
-                        )
-
-            for script in soup.find_all("script"):
-                for m in re.finditer(
-                    r'"studentId"\s*:\s*"?(\d+)"?.*?"name"\s*:\s*"([^"]+)"',
-                    script.string or "",
-                ):
-                    sid, name = m.group(1), m.group(2)
-                    if not any(s["id"] == sid for s in students):
-                        students.append({"id": sid, "name": name, "meal": ""})
+        for m in re.finditer(r'"fullName"\s*:\s*"([^"]+)"[^}]{0,300}"value"\s*:\s*"(\d{4,})"', html):
+            name, sid = m.group(1), m.group(2)
+            if sid not in seen_ids:
+                seen_ids.add(sid)
+                students.append({"id": sid, "name": name, "meal": ""})
 
         return students
 
     async def _fetch_calendar(self, session: aiohttp.ClientSession, student_id: str) -> list[dict]:
-        now = datetime.now(timezone.utc)
+        now = datetime.now().astimezone()
         start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = start + timedelta(days=1)
+        end = start + timedelta(days=2)
 
         async with session.post(
             f"{CUSTODIAN_BASE}/Events/FullCalendar",
-            json={
-                "studentId": student_id,
-                "start": start.strftime("%Y-%m-%dT%H:%M:%S"),
-                "end": end.strftime("%Y-%m-%dT%H:%M:%S"),
+            data={
+                "students": student_id,
+                "start": start.isoformat(),
+                "end": end.isoformat(),
             },
             timeout=aiohttp.ClientTimeout(total=15),
         ) as resp:
@@ -184,7 +161,7 @@ class VklassCoordinator(DataUpdateCoordinator):
         if isinstance(data, int):
             return data
         if isinstance(data, dict):
-            return int(data.get("unread", data.get("count", data.get("notifications", 0))))
+            return int(data.get("notifications", data.get("unread", data.get("count", 0))))
         return 0
 
     # ----------------------------------------------------------------- utils
