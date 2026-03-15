@@ -53,6 +53,39 @@ python3 skills/vklass/vklass.py
 /vklass
 ```
 
+### Kubernetes / OpenClaw deployment
+
+When running inside a Kubernetes pod (e.g. `openclaw-zoe-0` in namespace `openclaw-zoe`) there is no pip available at runtime. The required packages (`requests`, `beautifulsoup4`) must live in `~/.local` of the OpenClaw service user and be backed by a PersistentVolume so they survive pod restarts.
+
+**`skills/vklass/local/`** is the repo-tracked copy of those packages.
+
+**First-time setup — install packages into the pod and copy back:**
+
+```bash
+kubectl exec -it openclaw-zoe-0 -n openclaw-zoe -- pip install requests beautifulsoup4
+kubectl cp openclaw-zoe-0:/root/.local skills/vklass/local -n openclaw-zoe
+# Adjust /root to the actual $HOME of the service user if different
+```
+
+**Deploy the bundled packages to the pod:**
+
+```bash
+kubectl cp skills/vklass/local openclaw-zoe-0:/root/.local -n openclaw-zoe
+```
+
+**PersistentVolume requirement** — add a PVC mount to the pod spec so `~/.local` survives restarts:
+
+```yaml
+volumeMounts:
+  - name: home-local
+    mountPath: /root/.local   # adjust to service user's $HOME/.local
+
+volumes:
+  - name: home-local
+    persistentVolumeClaim:
+      claimName: openclaw-zoe-home-local
+```
+
 ### Scraper output
 
 ```json

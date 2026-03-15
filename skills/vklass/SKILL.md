@@ -81,6 +81,18 @@ For each child, produce a section like:
 - **No fabrication** — if a field is missing or empty, say so. Never invent schedule data.
 - **Single source of truth** — all data comes directly from the scraper output. Do not supplement with guesses.
 
+## Python dependencies
+
+The skill requires the `requests` and `beautifulsoup4` packages. They are bundled in the `local/` subdirectory of this skill:
+
+```
+skills/vklass/local/lib/python3/site-packages/
+```
+
+Python finds packages here automatically because `~/.local/lib/python*/site-packages` is on the default user site-packages path. No `pip install` is needed at runtime as long as `local/` has been copied to `~/.local` of the service user.
+
+**Kubernetes:** `~/.local` must be mounted as a PersistentVolume (PVC) so the packages survive pod restarts. See `local/README.md` for copy commands and example PVC manifest.
+
 ## Failure handling
 
 | Scenario | Action |
