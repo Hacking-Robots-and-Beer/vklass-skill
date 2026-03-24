@@ -141,7 +141,7 @@ def fetch_weekly_reports(session: requests.Session) -> dict[str, dict]:
         # iCal URL without lectures (cleaner for calendar apps)
         ical_url = ""
         for a in content_div.find_all("a", href=True):
-            href = a["href"].strip()
+            href = re.sub(r"\s+", "", a["href"])
             if "cal.vklass.se" in href and "includelectures=false" in href:
                 ical_url = href
                 break
