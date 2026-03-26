@@ -12,7 +12,7 @@ Authenticates with the Vklass Swedish school system (https://vklass.se) and retu
 - Today's full calendar (lessons, events)
 - Unread notification count
 
-Data is fetched live from `custodian.vklass.se` on every invocation. Nothing is cached.
+Results are cached to `/tmp/vklass_cache_YYYY-MM-DD.json` after the first successful scrape. Subsequent calls on the same day read from cache — no login or HTTP requests are made. Pass `--refresh` to force a live scrape and overwrite the cache.
 
 ## Inputs
 
@@ -32,7 +32,7 @@ Credentials must be set as environment variables before invoking this skill. The
    ```bash
    python3 "$SKILL_DIR/vklass.py"
    ```
-   Credentials are picked up automatically from the environment.
+   Credentials are picked up automatically from the environment. If today's data is cached in `/tmp/vklass_cache_YYYY-MM-DD.json`, the cache is returned immediately (no login). Pass `--refresh` to force a live scrape.
 
 3. **Parse JSON output** — the script prints a single JSON object to stdout:
    ```json

@@ -13,6 +13,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 
 try:
@@ -24,6 +25,32 @@ except ImportError as e:
 
 AUTH_BASE = "https://auth.vklass.se"
 CUSTODIAN_BASE = "https://custodian.vklass.se"
+
+
+def _cache_path() -> str:
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    return f"/tmp/vklass_cache_{date_str}.json"
+
+
+def load_cache() -> dict | None:
+    path = _cache_path()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def save_cache(data: dict) -> None:
+    path = _cache_path()
+    dir_ = os.path.dirname(path)
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=dir_, delete=False, suffix=".tmp") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            tmp_path = f.name
+        os.replace(tmp_path, path)
+    except Exception:
+        pass
 
 
 def get_verification_token(session: requests.Session) -> str:
@@ -307,7 +334,14 @@ def main():
     parser = argparse.ArgumentParser(description="Fetch Vklass schedule data")
     parser.add_argument("--username", default=os.environ.get("VKLASS_USERNAME", ""))
     parser.add_argument("--password", default=os.environ.get("VKLASS_PASSWORD", ""))
+    parser.add_argument("--refresh", action="store_true", help="Force a fresh scrape, ignoring any cached data")
     args = parser.parse_args()
+
+    if not args.refresh:
+        cached = load_cache()
+        if cached is not None:
+            print(json.dumps(cached, ensure_ascii=False, indent=2))
+            return
 
     if not args.username or not args.password:
         print(json.dumps({"error": "Missing credentials. Set VKLASS_USERNAME and VKLASS_PASSWORD or pass --username/--password"}))
@@ -315,6 +349,7 @@ def main():
 
     try:
         result = scrape(args.username, args.password)
+        save_cache(result)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     except Exception as e:
         print(json.dumps({"error": str(e)}))
